@@ -17,11 +17,12 @@ package dev.waterdog.waterdogpe.network.nethernet;
 
 import dev.waterdog.waterdogpe.ProxyServer;
 import dev.waterdog.waterdogpe.WaterdogPE;
+import dev.waterdog.waterdogpe.event.defaults.ProxyPingEvent;
 import dev.waterdog.waterdogpe.network.connection.codec.initializer.NetherNetServerSessionInitializer;
-import dev.waterdog.waterdogpe.utils.config.proxy.NetherNetSettings;
+import dev.waterdog.waterdogpe.network.protocol.ProtocolVersion;
 import dev.waterdog.waterdogpe.utils.config.proxy.NxsAdvancedSettings;
 import dev.waterdog.waterdogpe.utils.config.proxy.NxsSettings;
-import dev.waterdog.waterdogpe.utils.config.proxy.ProxyConfig;
+import dev.waterdog.waterdogpe.utils.config.proxy.SignalingSettings;
 import dev.waterdog.waterdogpe.utils.ThreadFactoryBuilder;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -36,10 +37,17 @@ import org.cloudburstmc.netty.signaling.ServerStatus;
 import org.cloudburstmc.netty.signaling.provider.NativeProviderHostFactory;
 import org.cloudburstmc.netty.signaling.provider.ProviderRuntimeConfiguration;
 import org.cloudburstmc.netty.signaling.provider.ProviderShutdown;
+import org.cloudburstmc.netty.util.nethernet.SecretValue;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -54,6 +62,15 @@ import java.util.function.Supplier;
  */
 @Log4j2
 public class NetherNetProvider implements AutoCloseable {
+
+    /** NetherNet's own files, next to config.yml, as Geyser keeps them. */
+    static final String DATA_FOLDER = "nethernet";
+    /**
+     * Holds the provider's link for the operator, in {@link #DATA_FOLDER}.
+     */
+    private static final String OPERATOR_LINK_FILE = "operator-link.txt";
+    /** Where network keeps the registration, inside the folder it is handed. */
+    private static final String STATE_DIRECTORY = "provider-state";
 
     private final ProxyServer proxy;
 
@@ -70,17 +87,17 @@ public class NetherNetProvider implements AutoCloseable {
     }
 
     /**
-     * @param settings The NetherNet settings, for the provider section and the UDP port
+     * @param settings The signaling settings, for the provider section and the addresses
      * @param address  The address the proxy listens on
-     * @param udpPort  The fixed UDP port peers are handed, which the provider cannot advertise if
-     *                 it is ephemeral
+     * @param udpPort  The UDP port peers are handed
      */
-    public void start(NetherNetSettings settings, InetSocketAddress address, int udpPort) throws Exception {
-        NxsSettings nxs = settings.getNxs();
+    public void start(SignalingSettings settings, InetSocketAddress address, int udpPort) throws Exception {
         Path dataPath = this.proxy.getDataPath();
+        Path folder = dataPath.resolve(DATA_FOLDER);
+        moveLegacyState(dataPath);
 
-        ProviderRuntimeConfiguration runtime = ProviderRuntimeConfiguration.resolve(providerSettings(nxs), dataPath, address.getAddress().getHostAddress(), udpPort,
-                this.proxy.getConfiguration().getMaxPlayerCount());
+        ProviderRuntimeConfiguration runtime = ProviderRuntimeConfiguration.resolve(providerSettings(settings, dataPath), folder,
+                address.getAddress().getHostAddress(), udpPort, bounded(this.proxy.callPingEvent(null).getMaximumPlayerCount()));
 
         ProviderStateStore store = new ProviderStateStore(runtime.stateDirectory());
         ProviderTransport transport = null;
@@ -100,7 +117,7 @@ public class NetherNetProvider implements AutoCloseable {
 
             this.client = new ProviderClient(runtime.clientConfiguration(), store, transport,
                     () -> this.statusSupplier.get(),
-                    () -> this.health(runtime.capacity()),
+                    this::health,
                     NetherNetProvider::log);
             // The client owns the store and the transport from here
             store = null;
@@ -124,7 +141,7 @@ public class NetherNetProvider implements AutoCloseable {
             }
             log.info(registrationMessage(registration));
             // The provider may offer the operator a link, such as one to claim this proxy
-            client.operatorAction().thenAccept(action -> action.ifPresent(value -> log.info(operatorActionMessage(value))));
+            client.operatorAction().thenAccept(this::announceOperatorAction);
             // Says where logins are vouched for, without putting provider credentials in the log
             log.debug("NetherNet client identities are authenticated by external signaling provider "
                     + runtime.origin().getHost() + "; direct login keys are checked against its admission tickets");
@@ -132,37 +149,127 @@ public class NetherNetProvider implements AutoCloseable {
     }
 
     /**
+     * Moves the registration kept next to config.yml before the nethernet folder existed, so the
+     * provider knows this proxy again rather than registering it as a new one.
+     */
+    static void moveLegacyState(Path dataPath) throws IOException {
+        Path legacy = dataPath.resolve(STATE_DIRECTORY);
+        Path state = dataPath.resolve(DATA_FOLDER).resolve(STATE_DIRECTORY);
+        if (Files.exists(legacy) && !Files.exists(state)) {
+            try {
+                Files.createDirectories(state.getParent());
+                Files.move(legacy, state);
+            } catch (IOException e) {
+                // Starting without it would register this proxy as a new one
+                throw new IOException("Could not move the NXS registration from " + legacy + " to " + state
+                        + ", move it there by hand: " + e.getMessage(), e);
+            }
+            log.info("Moved the NXS registration from {} to {}", legacy, state);
+        }
+    }
+
+    /**
      * What the provider runtime is configured with, named like Geyser's options. The proxy reports
      * game outcomes itself.
+     *
+     * @param dataPath The proxy's folder, which a file: token is read relative to like every other
+     *                 secret, where network would read it relative to the nethernet folder
      */
-    static ProviderRuntimeConfiguration.Settings providerSettings(NxsSettings nxs) throws IOException {
+    static ProviderRuntimeConfiguration.Settings providerSettings(SignalingSettings settings, Path dataPath) throws IOException {
+        NxsSettings nxs = settings.getNxs();
         NxsAdvancedSettings advanced = nxs.getAdvanced();
         ProviderClient.Location location;
         try {
             location = ProviderClient.Location.of(advanced.getLocation());
         } catch (IllegalArgumentException invalid) {
-            throw new IOException("nethernet.nxs.advanced.location needs a two-letter country code, a latitude and longitude pair, or both; city is optional");
+            throw new IOException("nethernet.signaling.nxs.advanced.location needs a two-letter country code, a latitude and longitude pair, or both; city is optional");
+        }
+        String token;
+        try {
+            token = SecretValue.resolve(nxs.getToken(), dataPath);
+        } catch (IOException unreadable) {
+            throw new IOException("nethernet.signaling.nxs.token: " + unreadable.getMessage(), unreadable);
         }
         return ProviderRuntimeConfiguration.Settings.builder(nxs.getEndpoint())
-                .token(nxs.getToken())
-                .advertiseAddresses(nxs.getAdvertiseAddresses())
+                .token(token)
+                .advertiseAddresses(settings.getAdvertiseAddresses())
                 .assistedJoins(advanced.isAssistedJoins())
                 .connectionChecks(advanced.isConnectionChecks())
-                .stunDiscovery(advanced.isStunDiscovery())
+                .stunDiscovery(settings.isStunDiscovery())
                 .deregisterOnShutdown(advanced.isDeregisterOnShutdown())
                 .location(location)
+                .bedrockProtocols(bedrockProtocols())
                 .gameOutcomes(true)
                 .build();
     }
 
-    public static String operatorActionMessage(ProviderClient.OperatorAction action) {
-        return action.text() + " " + action.url();
+    /**
+     * Every protocol a login is accepted with, which is every {@link ProtocolVersion}, and the
+     * newest display version.
+     */
+    static ProviderClient.BedrockProtocols bedrockProtocols() {
+        List<Integer> accepted = Arrays.stream(ProtocolVersion.values()).map(ProtocolVersion::getProtocol)
+                .distinct().sorted().toList();
+        List<String> names = ProtocolVersion.latest().getDisplayNames();
+        return new ProviderClient.BedrockProtocols(accepted, names.get(names.size() - 1));
     }
 
-    private ProviderClient.Health health(int capacity) {
-        return new ProviderClient.Health(this.accepting(), capacity,
-                new ProviderClient.Software("WaterdogPE", WaterdogPE.version().baseVersion()),
-                new ProviderClient.ConnectedPlayers(this.players(), System.currentTimeMillis()));
+    private void announceOperatorAction(Optional<ProviderClient.OperatorAction> action) {
+        try {
+            String message = this.storeOperatorAction(action);
+            if (message != null) {
+                log.info(message);
+            }
+        } catch (IOException e) {
+            log.warn("Could not keep the signaling service's link in {}: {}", this.operatorLinkFile(), e.getMessage());
+        }
+    }
+
+    /**
+     * Keeps the provider's link for the operator, such as one to claim this proxy, in the nethernet folder. See
+     * {@link #storeOperatorAction(Path, Optional)}.
+     */
+    public String storeOperatorAction(Optional<ProviderClient.OperatorAction> action) throws IOException {
+        return storeOperatorAction(this.operatorLinkFile(), action);
+    }
+
+    private Path operatorLinkFile() {
+        return this.proxy.getDataPath().resolve(DATA_FOLDER).resolve(OPERATOR_LINK_FILE);
+    }
+
+    /**
+     * Writes the provider's link to a file only this user can read, as it grants access to this proxy and a
+     * console is often logged. With no link the file is removed. The provider and wdnethernet action can both
+     * write it, so one waits for the other.
+     *
+     * @return the provider's text and where its link is, or null when there is none
+     */
+    public static synchronized String storeOperatorAction(Path file, Optional<ProviderClient.OperatorAction> action) throws IOException {
+        Files.deleteIfExists(file);
+        if (action.isEmpty()) {
+            return null;
+        }
+        ProviderClient.OperatorAction value = action.get();
+        Files.createDirectories(file.getParent());
+        if (file.getFileSystem().supportedFileAttributeViews().contains("posix")) {
+            Files.createFile(file, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        }
+        Files.writeString(file, value.text() + "\n" + value.url() + "\nExpires " + Instant.ofEpochMilli(value.expiresAt()) + "\n");
+        return value.text() + " The link is in " + file + ".";
+    }
+
+    private ProviderClient.Health health() {
+        return health(this.proxy.callPingEvent(null), this.proxy.getNetherNetInterface().isFull(),
+                new ProviderClient.Software("WaterdogPE", WaterdogPE.version().baseVersion()));
+    }
+
+    /**
+     * The counts a RakNet ping shows, which the provider lists. Like built-in signaling, only an
+     * explicit limit turns players away, see {@link NetherNetInterface#isFull()}.
+     */
+    static ProviderClient.Health health(ProxyPingEvent ping, boolean full, ProviderClient.Software software) {
+        return new ProviderClient.Health(!full, bounded(ping.getMaximumPlayerCount()), software,
+                new ProviderClient.ConnectedPlayers(bounded(ping.getPlayerCount()), System.currentTimeMillis()));
     }
 
     private static void log(ProviderDiagnostic diagnostic) {
@@ -178,9 +285,10 @@ public class NetherNetProvider implements AutoCloseable {
         String instanceId = registration.instanceId();
         String address = registration.publicAddress();
         return address != null
-                ? "Provider address: " + address + " (instance " + instanceId + ")"
-                : "Provider instance registered: " + instanceId
-                        + "; public addresses are managed on its attached Signal Servers";
+                ? "Registered with the external signaling service. Players can join at " + address
+                        + " (instance " + instanceId + ")."
+                : "Registered with the external signaling service (instance " + instanceId + "). "
+                        + "The addresses players join with are managed by the service.";
     }
 
     @Override
@@ -278,21 +386,24 @@ public class NetherNetProvider implements AutoCloseable {
     }
 
     /**
-     * What the provider shows for this proxy, which is the same thing a player sees in the list.
+     * Asked again on every check, so what plugins change in the ping reaches the provider.
      */
     private ServerStatus collectStatus() {
-        ProxyConfig config = this.proxy.getConfiguration();
-        return new ServerStatus(config.getMotd(), config.getSubMotd(), config.getMaxPlayerCount(), 0);
-    }
-
-    private int players() {
-        return this.proxy.getPlayerManager().getPlayers().size();
+        return status(this.proxy.callPingEvent(null));
     }
 
     /**
-     * Whether the proxy has room for more players.
+     * What the provider lists for this proxy, the same thing a RakNet ping shows.
      */
-    private boolean accepting() {
-        return this.players() < this.proxy.getConfiguration().getMaxPlayerCount();
+    static ServerStatus status(ProxyPingEvent ping) {
+        return new ServerStatus(ping.getMotd(), ping.getSubMotd(), bounded(ping.getMaximumPlayerCount()),
+                NetherNetInterface.gameType(ping.getGameType()));
+    }
+
+    /**
+     * Keeps a count within what the provider takes.
+     */
+    private static int bounded(int count) {
+        return Math.max(0, Math.min(count, 1_000_000));
     }
 }
