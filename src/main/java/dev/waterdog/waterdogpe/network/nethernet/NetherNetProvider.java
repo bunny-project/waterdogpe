@@ -16,6 +16,7 @@
 package dev.waterdog.waterdogpe.network.nethernet;
 
 import dev.waterdog.waterdogpe.ProxyServer;
+import dev.waterdog.waterdogpe.VersionInfo;
 import dev.waterdog.waterdogpe.WaterdogPE;
 import dev.waterdog.waterdogpe.event.defaults.ProxyPingEvent;
 import dev.waterdog.waterdogpe.network.connection.codec.initializer.NetherNetServerSessionInitializer;
@@ -37,6 +38,7 @@ import org.cloudburstmc.netty.signaling.ServerStatus;
 import org.cloudburstmc.netty.signaling.provider.NativeProviderHostFactory;
 import org.cloudburstmc.netty.signaling.provider.ProviderRuntimeConfiguration;
 import org.cloudburstmc.netty.signaling.provider.ProviderShutdown;
+import org.cloudburstmc.netty.util.nethernet.IpRangeSet;
 import org.cloudburstmc.netty.util.nethernet.SecretValue;
 
 import java.io.IOException;
@@ -90,13 +92,14 @@ public class NetherNetProvider implements AutoCloseable {
      * @param settings The signaling settings, for the provider section and the addresses
      * @param address  The address the proxy listens on
      * @param udpPort  The UDP port peers are handed
+     * @param relays   The PROXY protocol relays in front of that port
      */
-    public void start(SignalingSettings settings, InetSocketAddress address, int udpPort) throws Exception {
+    public void start(SignalingSettings settings, InetSocketAddress address, int udpPort, IpRangeSet relays) throws Exception {
         Path dataPath = this.proxy.getDataPath();
         Path folder = dataPath.resolve(DATA_FOLDER);
         moveLegacyState(dataPath);
 
-        ProviderRuntimeConfiguration runtime = ProviderRuntimeConfiguration.resolve(providerSettings(settings, dataPath), folder,
+        ProviderRuntimeConfiguration runtime = ProviderRuntimeConfiguration.resolve(providerSettings(settings, dataPath, relays), folder,
                 address.getAddress().getHostAddress(), udpPort, bounded(this.proxy.callPingEvent(null).getMaximumPlayerCount()));
 
         ProviderStateStore store = new ProviderStateStore(runtime.stateDirectory());
@@ -174,8 +177,10 @@ public class NetherNetProvider implements AutoCloseable {
      *
      * @param dataPath The proxy's folder, which a file: token is read relative to like every other
      *                 secret, where network would read it relative to the nethernet folder
+     * @param relays   The PROXY protocol relays in front of the media port
      */
-    static ProviderRuntimeConfiguration.Settings providerSettings(SignalingSettings settings, Path dataPath) throws IOException {
+    static ProviderRuntimeConfiguration.Settings providerSettings(SignalingSettings settings, Path dataPath,
+                                                                  IpRangeSet relays) throws IOException {
         NxsSettings nxs = settings.getNxs();
         NxsAdvancedSettings advanced = nxs.getAdvanced();
         ProviderClient.Location location;
@@ -200,6 +205,7 @@ public class NetherNetProvider implements AutoCloseable {
                 .location(location)
                 .bedrockProtocols(bedrockProtocols())
                 .gameOutcomes(true)
+                .proxyProtocolRelays(relays)
                 .build();
     }
 
@@ -259,8 +265,14 @@ public class NetherNetProvider implements AutoCloseable {
     }
 
     private ProviderClient.Health health() {
+        VersionInfo info = WaterdogPE.version();
+        String version = info.fullVersion();
+        // NXS refuses versions over 128 characters, which a long branch name can reach
+        if (version.length() > 128) {
+            version = info.baseVersion();
+        }
         return health(this.proxy.callPingEvent(null), this.proxy.getNetherNetInterface().isFull(),
-                new ProviderClient.Software("WaterdogPE", WaterdogPE.version().baseVersion()));
+                new ProviderClient.Software("WaterdogPE", version));
     }
 
     /**
