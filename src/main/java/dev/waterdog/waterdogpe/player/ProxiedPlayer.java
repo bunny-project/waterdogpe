@@ -134,6 +134,9 @@ public class ProxiedPlayer implements CommandSender {
     private final Collection<ServerInfo> pendingServers = ObjectCollections.synchronize(new ObjectArrayList<>());
     private ClientConnection clientConnection;
     private ClientConnection pendingConnection;
+    /** When the active downstream last changed, the first join included, 0 before any. */
+    @Getter
+    private volatile long lastServerSwitchMillis;
 
 
     /**
@@ -1053,6 +1056,7 @@ public class ProxiedPlayer implements CommandSender {
 
     public void setDownstreamConnection(ClientConnection connection) {
         this.clientConnection = connection;
+        this.lastServerSwitchMillis = System.currentTimeMillis();
         if (this.getPendingConnection() == connection) {
             this.setPendingConnection(null);
         }

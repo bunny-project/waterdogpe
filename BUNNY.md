@@ -45,3 +45,5 @@ jar: `build/libs/Waterdog.jar`. 운영 교체는 프록시 재시작이 필요�
 - `network_settings.session_timeout` 을 클라이언트 RakNet 세션에 적용
 - EventManager 핸들러 캐시 동시성 수정(ConcurrentHashMap + copy-on-write)
 - 다운스트림 로그인을 서버 이동 때마다 새로 서명(첫 접속 때 만든 토큰을 재사용하면 24시간 뒤 이동이 `invalidSession.tooLate` 로 거절됨)
+- NetherNet SCTP 타이머를 시스템 프로퍼티(`waterdog.nethernetSctp*`)로 조절, 지정한 것만 적용
+- NetherNet 업스트림이 전송 계층 때문에 끊길 때 사유·SCTP 통계·마지막 서버 전환 후 경과를 한 줄 INFO 로 기록. 시험 절차는 `docs/nethernet-sctp-experiment.md`

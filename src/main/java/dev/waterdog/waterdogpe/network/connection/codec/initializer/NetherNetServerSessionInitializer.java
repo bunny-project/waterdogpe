@@ -22,6 +22,7 @@ import dev.waterdog.waterdogpe.network.connection.codec.server.ServerErrorHandle
 import dev.waterdog.waterdogpe.network.connection.peer.BedrockServerSession;
 import dev.waterdog.waterdogpe.network.connection.peer.ProxiedBedrockPeer;
 import dev.waterdog.waterdogpe.network.nethernet.GameOutcomeReporter;
+import dev.waterdog.waterdogpe.network.nethernet.NetherNetDisconnectLogger;
 import dev.waterdog.waterdogpe.network.protocol.ProtocolVersion;
 import dev.waterdog.waterdogpe.network.protocol.handler.upstream.LoginUpstreamHandler;
 import io.netty.channel.Channel;
@@ -65,6 +66,8 @@ public class NetherNetServerSessionInitializer extends ProxiedSessionInitializer
         }
 
         super.initChannel(channel);
+        // First, so it sees the transport's close reason before any handler of the session does
+        channel.pipeline().addFirst(NetherNetDisconnectLogger.NAME, NetherNetDisconnectLogger.of(this.proxy));
         if (this.outcomes != null) {
             channel.pipeline().addBefore(BedrockPeer.NAME, GameOutcomeReporter.HANDLER_NAME,
                     this.outcomes.observer(protocol -> ProtocolVersion.get(protocol) != null));
