@@ -25,7 +25,18 @@ RakNet 은 `network_settings.session_timeout`(운영 30초)으로 끊김을 버�
   `LibDataChannel.setSctpSettings` 를 부른다. network 라이브러리가 첫 채널 생성 때 자기 설정으로 덮어쓰기 때문에 순서가 바뀌면 무효가 된다.
 - 설정은 네이티브 라이브러리 전역이라 프록시→백엔드 NetherNet 연결에도 적용된다.
 - 적용되면 시작 로그에 `NetherNet SCTP settings set from system properties: SctpSettings{...}` 가 한 줄 나온다. 이 줄이 없으면 적용되지 않은 것이다.
-- 미확인: 지정하지 않은 항목의 libdatachannel 기본값, 0 이 네이티브에서 「기본값 유지」로 처리되는지(network 라이브러리가 현재 같은 방식으로 0 을 넘기고 있어 동작은 하고 있다).
+- 지정하지 않았을 때의 값(libdatachannel master `sctptransport.cpp` `SetSettings` 의 `value_or`, 10-29 확인. 번들된 네이티브 빌드와 같은지는 미검증):
+
+  | 항목 | 기본값 |
+  |---|---|
+  | maxRetransmitAttempts | 5 (init·assoc·path 세 sysctl 에 같은 값) |
+  | heartbeatInterval | 10000 ms |
+  | minRetransmitTimeout | 200 ms (이 프록시는 network 라이브러리가 400 으로 지정) |
+  | maxRetransmitTimeout | 10000 ms |
+  | initialRetransmitTimeout | 1000 ms |
+
+  RTO 가 지수로 늘어나므로 응답이 전혀 없을 때 연관이 포기하기까지는 대략 13~25초 안팎이다(400ms 시작 시 0.4+0.8+1.6+3.2+6.4 ≈ 12.4초에 5번째 재전송 만료).
+- 미확인: Java 바인딩이 0 을 「미지정」으로 바꿔 넘기는지(network 라이브러리가 현재 같은 방식으로 0 을 넘기고 있어 동작은 하고 있다).
 
 ### 1.2 끊김 진단 로그
 
