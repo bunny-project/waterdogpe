@@ -55,6 +55,8 @@ import java.util.Locale;
  * true or false.</li>
  * <li>{@code waterdog.nethernetSignalingMode}: overrides {@code nethernet.signaling.mode}, builtin,
  * nxs, hybrid or plugin.</li>
+ * <li>{@code waterdog.nethernetSctp*}: the SCTP timers of every peer, see
+ * {@link NetherNetSctpTuning}. Unset, the native library keeps its own.</li>
  * </ul>
  */
 @Log4j2

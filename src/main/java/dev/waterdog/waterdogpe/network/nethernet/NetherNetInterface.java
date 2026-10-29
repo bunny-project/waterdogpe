@@ -314,6 +314,8 @@ public class NetherNetInterface implements NetworkInterface, SignalingService {
             NetherNetLogging.setNativeLogLevel("WARN");
         }
 
+        NetherNetSctpTuning.apply();
+
         this.identity = ProxyIdentity.identity(this.proxy);
         log.info("NetherNet identifies this operator to players as {}", ProxyIdentity.domain(this.proxy));
     }
