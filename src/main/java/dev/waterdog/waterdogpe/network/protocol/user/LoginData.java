@@ -106,13 +106,12 @@ public class LoginData {
     }
 
     /**
-     * The login to send downstream, signed by the proxy.
+     * The login to send downstream, signed by the proxy. Signed again on every call: the chain or token
+     * in it expires 24 hours after signing and a downstream refuses an expired one, so reusing the first
+     * login left a player connected for a day unable to move to another server.
      */
     public LoginPacket getLoginPacket() {
-        if (this.loginPacket == null) {
-            this.rebuildLoginPacket();
-        }
-        return this.loginPacket;
+        return this.rebuildLoginPacket();
     }
 
 }
