@@ -53,9 +53,22 @@ public class InitialHandler extends AbstractDownstreamHandler {
             // player.getServerInfo() is still null on the initial connection, use the failed target.
             ServerInfo serverInfo = this.connection.getServerInfo();
             if (!this.player.sendToFallback(serverInfo, ReconnectReason.TRANSFER_FAILED, message)) {
-                this.player.disconnect(new TranslationContainer("waterdog.downstream.transfer.failed", serverInfo.getServerName(), message));
+                this.player.disconnect(this.refusalMessage(packet.getStatus(), serverInfo, message));
             }
         }, this.connection);
+    }
+
+    /**
+     * A version refusal gets its own message so the player knows to update instead of seeing the
+     * generic transfer failure, which servers often reword as a maintenance notice.
+     */
+    private TranslationContainer refusalMessage(PlayStatusPacket.Status status, ServerInfo serverInfo, String message) {
+        String version = this.player.getProtocol().getMinecraftVersion();
+        return switch (status) {
+            case LOGIN_FAILED_CLIENT_OLD -> new TranslationContainer("waterdog.downstream.client.outdated", version);
+            case LOGIN_FAILED_SERVER_OLD -> new TranslationContainer("waterdog.downstream.server.outdated", version);
+            default -> new TranslationContainer("waterdog.downstream.transfer.failed", serverInfo.getServerName(), message);
+        };
     }
 
     @Override

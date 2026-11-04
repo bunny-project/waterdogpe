@@ -103,4 +103,24 @@ public class InitialHandlerTest {
         assertTrue(this.harness.sentMessages.contains("waterdog.downstream.transfer.failed"),
                 "kick reason must reach the player instead of being lost on channel close");
     }
+
+    @Test
+    void outdatedClientIsToldToUpdate() {
+        PlayStatusPacket packet = new PlayStatusPacket();
+        packet.setStatus(PlayStatusPacket.Status.LOGIN_FAILED_CLIENT_OLD);
+
+        this.handler.handle(packet);
+
+        assertFalse(this.harness.player.isConnected());
+        assertTrue(this.harness.sentMessages.contains("waterdog.downstream.client.outdated"));
+        assertFalse(this.harness.sentMessages.contains("waterdog.downstream.transfer.failed"));
+    }
+
+    @Test
+    void outdatedServerSaysTheVersionIsNotSupportedYet() {
+        this.handler.handle(loginFailed());
+
+        assertTrue(this.harness.sentMessages.contains("waterdog.downstream.server.outdated"));
+        assertFalse(this.harness.sentMessages.contains("waterdog.downstream.transfer.failed"));
+    }
 }

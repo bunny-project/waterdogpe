@@ -24,6 +24,8 @@ import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 public class LangConfig {
 
@@ -36,31 +38,42 @@ public class LangConfig {
     }
 
     public void load() {
-        try {
-            String content = FileUtils.readFile(this.file);
-            for (String line : content.split("\n")) {
-                line = line.trim();
-                if (line.equals("") || line.charAt(0) == '#') {
-                    continue;
-                }
-                String[] t = line.split("=");
-                if (t.length < 2) {
-                    continue;
-                }
-                String key = t[0];
-                StringBuilder value = new StringBuilder();
-                for (int i = 1; i < t.length - 1; i++) {
-                    value.append(t[i]).append("=");
-                }
-                value.append(t[t.length - 1]);
-                if (value.toString().equals("")) {
-                    continue;
-                }
-                this.transactionMap.put(key, value.toString());
+        // Bundled defaults first, so keys added after the file was saved are not shown raw.
+        try (InputStream defaults = LangConfig.class.getClassLoader().getResourceAsStream("lang.ini")) {
+            if (defaults != null) {
+                this.parse(new String(defaults.readAllBytes(), StandardCharsets.UTF_8));
             }
+        } catch (IOException e) {
+            MainLogger.getLogger().error("Unable to load the bundled lang.ini", e);
+        }
 
+        try {
+            this.parse(FileUtils.readFile(this.file));
         } catch (IOException e) {
             MainLogger.getLogger().error("Unable to load Config " + this.file.toString());
+        }
+    }
+
+    private void parse(String content) {
+        for (String line : content.split("\n")) {
+            line = line.trim();
+            if (line.equals("") || line.charAt(0) == '#') {
+                continue;
+            }
+            String[] t = line.split("=");
+            if (t.length < 2) {
+                continue;
+            }
+            String key = t[0];
+            StringBuilder value = new StringBuilder();
+            for (int i = 1; i < t.length - 1; i++) {
+                value.append(t[i]).append("=");
+            }
+            value.append(t[t.length - 1]);
+            if (value.toString().equals("")) {
+                continue;
+            }
+            this.transactionMap.put(key, value.toString());
         }
     }
 
