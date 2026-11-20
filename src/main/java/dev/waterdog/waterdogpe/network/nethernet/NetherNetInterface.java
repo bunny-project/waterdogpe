@@ -39,6 +39,7 @@ import dev.waterdog.waterdogpe.utils.config.proxy.NetherNetSettings;
 import dev.waterdog.waterdogpe.utils.config.proxy.ProxyConfig;
 import dev.waterdog.waterdogpe.utils.config.proxy.SignalingSettings;
 import dev.waterdog.waterdogpe.network.NetworkMetrics;
+import dev.waterdog.waterdogpe.scheduler.TaskHandler;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
@@ -56,6 +57,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Accepts NetherNet connections, next to {@link dev.waterdog.waterdogpe.network.RakNetInterface} or
@@ -73,8 +75,14 @@ public class NetherNetInterface implements NetworkInterface, SignalingService {
     private static final int GAME_TYPE_CREATIVE = 1;
     private static final int GAME_TYPE_ADVENTURE = 2;
 
+    /** How often the HTTPS certificate files are checked for a renewal, 10 minutes. */
+    private static final int CERTIFICATE_CHECK_TICKS = 20 * 60 * 10;
+
     private final ProxyServer proxy;
     private final List<Binding> bindings = new ObjectArrayList<>();
+    /** The HTTPS contexts of the listeners, checked by {@link #certificateWatch}. */
+    private final List<ReloadingSslContext> certificates = new CopyOnWriteArrayList<>();
+    private TaskHandler<?> certificateWatch;
 
     private volatile NetherServerMetrics serverMetrics;
     private volatile NetherNetProvider provider;
@@ -260,11 +268,31 @@ public class NetherNetInterface implements NetworkInterface, SignalingService {
             if (key == null || key.isBlank()) {
                 builder.setHttpsKeystore(certificate.toFile(), password == null ? "" : password);
             } else {
-                builder.setHttpsPem(certificate.toFile(), this.proxy.getDataPath().resolve(key).toFile(),
+                // Built like setHttpsPem, but swapped for a renewed pair without restarting the proxy
+                ReloadingSslContext context = ReloadingSslContext.pem(certificate, this.proxy.getDataPath().resolve(key),
                         password == null || password.isBlank() ? null : password);
+                builder.setSslContext(context);
+                this.watchCertificate(context);
             }
         }
         return builder.build();
+    }
+
+    /**
+     * Checks the HTTPS certificate files of every listener on a timer, so a renewal takes effect for
+     * new connections without restarting the proxy. The files are read off the main thread.
+     */
+    private void watchCertificate(ReloadingSslContext context) {
+        this.certificates.add(context);
+        log.info("NetherNet HTTPS certificate is valid until {}, renewals on disk are picked up within {} minutes",
+                context.notAfter(), CERTIFICATE_CHECK_TICKS / 20 / 60);
+        if (this.certificateWatch == null) {
+            this.certificateWatch = this.proxy.getScheduler().scheduleDelayedRepeating(() -> {
+                for (ReloadingSslContext certificate : List.copyOf(this.certificates)) {
+                    certificate.reloadIfChanged();
+                }
+            }, CERTIFICATE_CHECK_TICKS, CERTIFICATE_CHECK_TICKS, true);
+        }
     }
 
     /**
@@ -467,6 +495,12 @@ public class NetherNetInterface implements NetworkInterface, SignalingService {
         this.bindings.clear();
         this.primaryStarted = false;
         this.mediaPort = 0;
+
+        if (this.certificateWatch != null) {
+            this.certificateWatch.cancel();
+            this.certificateWatch = null;
+        }
+        this.certificates.clear();
 
         if (this.provider != null) {
             this.provider.close();
